@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Pointage stagiaires - NHC</title>
+<style>
+:root{color-scheme:light dark;--bg:#f5f7fa;--card:#fff;--text:#1d2330;--muted:#6b7280;--border:#e5e7eb;--primary:#2563eb;--grey:#64748b}
+@media (prefers-color-scheme: dark){:root{--bg:#0f1420;--card:#1a2130;--text:#e6e9ef;--muted:#9aa3b2;--border:#2b3446}}
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);padding:12px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px;margin:12px 0}
+h1{font-size:20px;margin:0 0 6px}
+h2{font-size:16px;margin:0 0 10px}
+h3{font-size:14px;margin:14px 0 6px}
+input,select,button{font:inherit;width:100%;padding:12px;border-radius:10px;border:1px solid var(--border);background:var(--card);color:var(--text);margin-top:8px}
+button{background:var(--primary);color:#fff;border:none;font-weight:600;cursor:pointer}
+button.grey{background:var(--grey)}
+button.add{width:auto;display:inline-block;padding:8px 12px;margin-top:0}
+button:disabled{opacity:.5}
+.row{display:flex;gap:8px;align-items:center;justify-content:space-between}
+.row>*{flex:1}
+.ligne{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border)}
+.msg{margin-top:10px;padding:10px;border-radius:8px;font-size:14px}
+.ok{background:#dcfce7;color:#14532d}
+.bad{background:#fee2e2;color:#7f1d1d}
+.info{background:#e0e7ff;color:#1e3a8a}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:6px;border-bottom:1px solid var(--border)}
+.small{font-size:12px;color:var(--muted)}
+a{color:var(--primary)}
+</style>
+</head>
+<body>
+<div id="app"><p class="small">Chargement…</p></div>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script>
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyDb0-nyhi7h4lBuRofnCXtWmz2YpfX0Ngc",
+  authDomain: "pointage-stagiaires-nhc.firebaseapp.com",
+  projectId: "pointage-stagiaires-nhc",
+  storageBucket: "pointage-stagiaires-nhc.firebasestorage.app",
+  messagingSenderId: "540959414849",
+  appId: "1:540959414849:web:b43ff162bac873a3db04c0"
+};
+firebase.initializeApp(FIREBASE_CONFIG);
+const auth = firebase.auth();
+const db = firebase.firestore();
+const TS = () => firebase.firestore.FieldValue.serverTimestamp();
+
+// ---------- Réglages ----------
+const ADMIN_EMAIL = "ndongna_r1@yahoo.com";
+const DOMAINE = "@pointage-nhc.app";
+const CENTRE = { lat: 4.010583, lng: 9.749056 };
+const RAYON_M = 50;
+const PRECISION_MAX = 100;
+const TOLERANCE_MIN = 15;
+const PERIODE_0 = new Date(2026, 10, 9);      // lundi 9 novembre 2026
+const DELAI_PLANNING_H = 72;
+const DELAI_REMPLACEMENT_H = 36;
+const MAX_REMP_REMPLACANT = 4;
+const SEUIL_ABSENCE_REMP = 2;
+const HEURE_DEBUT = { jour: 8, garde: 16 };
+const HEURE_FIN = { jour: 17, garde: 8 };
+const LIBELLE = { jour: "Journée 08h-17h", garde: "Garde 16h-08h", non: "Non travaillé" };
+
+// ---------- Outils ----------
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const pad = n => String(n).padStart(2, "0");
+const iso = d => d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate());
+const parseISO = s => new Date(+s.slice(0, 4), +s.slice(5, 7) - 1, +s.slice(8, 10));
+const jour0 = d => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+const plus = (d, n) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
+const heure = d => pad(d.getHours()) + ":" + pad(d.getMinutes());
+const dateFR = d => d.toLocaleDateString("fr-FR", { weekday: "short", day: "numeric", month: "short" });
+const ts = x => (x && x.toMillis) ? x.toMillis() : Date.now() + 1e13;
+const codeOk = c => c === "jour" || c === "garde";
+const debutPlage = (d, code) => new Date(d.getFullYear(), d.getMonth(), d.getDate(), HEURE_DEBUT[code]);
+const heuresAvant = date => (date - new Date()) / 3600000;
+const periodeDe = d => { const n = Math.round((jour0(d) - PERIODE_0) / 86400000); return plus(PERIODE_0, Math.floor(n / 14) * 14); };
+const jours14 = p => Array.from({ length: 14 }, (_, i) => plus(p, i));
+const moisCourant = () => iso(new Date()).slice(0, 7);
+const docs = s => s.docs.map(d => ({ id: d.id, ...d.data() }));
+const codeAleatoire = () => Array.from(crypto.getRandomValues(new Uint8Array(6)), b => "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"[b % 32]).join("");
+const dateTxt = t => t && t.toDate ? t.toDate().toLocaleString("fr-FR") : "à l'instant";
+
+let unsubs = [], role = null, monSid = null, stagiaires = [], pointages = [], plannings = [], remplacements = [], coords = {};
+let activationEnCours = false, planningModifie = false;
+
+function msg(texte, classe, cible = "msg") {
+  const el = $(cible);
+  if (el) el.innerHTML = '<div class="msg ' + classe + '">' + texte + '</div>';
+}
+function arreterEcoutes() { unsubs.forEach(f => f()); unsubs = []; }
+function nomDe(id) { const s = stagiaires.find(x => x.id === id); return s ? s.prenom + " " + s.nom : "?"; }
+
+function distanceM(a, b, c, d) {
+  const R = 6371000, r = x => x * Math.PI / 180;
+  const dl = r(c - a), dn = r(d - b);
+  const h = Math.sin(dl / 2) ** 2 + Math.cos(r(a)) * Math.cos(r(c)) * Math.sin(dn / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+function position() {
+  return new Promise(res => {
+    if (!navigator.geolocation) { msg("La géolocalisation n'est pas disponible sur cet appareil.", "bad"); return res(false); }
+    msg("Recherche de votre position…", "info");
+    navigator.geolocation.getCurrentPosition(p => {
+      const prec = Math.round(p.coords.accuracy);
+      const d = distanceM(CENTRE.lat, CENTRE.lng, p.coords.latitude, p.coords.longitude);
+      if (prec > PRECISION_MAX) { msg(`Signal GPS trop faible (±${prec} m). Approchez-vous d'une fenêtre et réessayez.`, "bad"); return res(false); }
+      if (d > RAYON_M) { msg(`Pointage refusé : vous êtes à environ ${Math.round(d)} m du centre (limite ${RAYON_M} m).`, "bad"); return res(false); }
+      res(true);
+    }, () => { msg("Position non obtenue. Autorisez la localisation pour ce site.", "bad"); res(false); },
+    { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
+  });
+}
+
+// ---------- Plannings et remplacements (logique) ----------
+function planningActuel(sid, p) {
+  const liste = plannings.filter(x => x.sid === sid && x.periode === iso(p)).sort((a, b) => ts(b.cree) - ts(a.cree));
+  return liste[0] ? liste[0].jours : {};
+}
+const remAcceptes = () => remplacements.filter(r => r.statut === "accepte");
+function rangRemplacement(sid, d) {
+  const j = iso(d);
+  const liste = remAcceptes().filter(r => r.de === sid && r.jour.slice(0, 7) === j.slice(0, 7) && r.jour <= j)
+    .sort((a, b) => a.jour.localeCompare(b.jour));
+  const i = liste.findIndex(r => r.jour === j);
+  return i < 0 ? 0 : i + 1;
+}
+// Plage réelle d'une personne pour un jour donné (remplacement pris en compte)
+function plageDe(sid, d) {
+  const j = iso(d);
+  const recu = remAcceptes().find(r => r.vers === sid && r.jour === j);
+  if (recu) return recu.plage;
+  const rang = rangRemplacement(sid, d);
+  if (rang > 0 && rang <= SEUIL_ABSENCE_REMP) return undefined; // remplacé : aucune plage à pointer
+  return planningActuel(sid, periodeDe(d))[j];
+}
+// Bilan du mois : retards et absences (jours passés uniquement)
+function bilanMois() {
+  const auj = jour0(new Date());
+  const debut = new Date(auj.getFullYear(), auj.getMonth(), 1);
+  return stagiaires.filter(s => s.actif && s.uid).map(s => {
+    let retards = 0, absences = 0;
+    for (let d = debut; d < auj; d = plus(d, 1)) {
+      const j = iso(d);
+      if (rangRemplacement(s.id, d) > SEUIL_ABSENCE_REMP) { absences++; continue; }
+      const code = plageDe(s.id, d);
+      if (!codeOk(code)) continue;
+      const arr = pointages.filter(p => p.sid === s.id && p.type === "arrivee" && p.jour === j);
+      if (!arr.length) absences++;
+      else if (arr[0].statut.startsWith("Retard")) retards++;
+    }
+    return { s, retards, absences };
+  });
+}
+
+// ---------- Écrans de connexion ----------
+function ecranConnexion() {
+  $("app").innerHTML = `
+  <div class="card"><h1>Pointage des stagiaires</h1><p class="small">NHC · Connexion</p>
+    <input id="f-id" placeholder="Identifiant (administrateur : e-mail)" autocomplete="username">
+    <input id="f-mdp" type="password" placeholder="Mot de passe" autocomplete="current-password">
+    <button onclick="connexion()">Se connecter</button>
+    <button class="grey" onclick="ecranActivation()">Premier accès (code reçu par WhatsApp)</button>
+    <div id="msg"></div>
+  </div>`;
+}
+async function connexion() {
+  const id = $("f-id").value.trim(), mdp = $("f-mdp").value;
+  const email = id.includes("@") ? id : id.toLowerCase() + DOMAINE;
+  try { await auth.signInWithEmailAndPassword(email, mdp); }
+  catch (e) { msg("Identifiant ou mot de passe incorrect.", "bad"); }
+}
+function ecranActivation() {
+  $("app").innerHTML = `
+  <div class="card"><h1>Premier accès</h1>
+    <p class="small">Saisissez le code reçu par WhatsApp, puis choisissez votre identifiant (lettres, chiffres, point ou tiret, sans espace) et votre mot de passe (6 caractères minimum).</p>
+    <input id="a-code" placeholder="Code d'accès" autocapitalize="characters">
+    <input id="a-id" placeholder="Identifiant souhaité" autocapitalize="none">
+    <input id="a-mdp" type="password" placeholder="Mot de passe">
+    <button onclick="activer()">Activer mon compte</button>
+    <button class="grey" onclick="ecranConnexion()">Retour</button>
+    <div id="msg"></div>
+  </div>`;
+}
+async function activer() {
+  const code = $("a-code").value.trim().toUpperCase();
+  const id = $("a-id").value.trim().toLowerCase();
+  const mdp = $("a-mdp").value;
+  if (!/^[a-z0-9._-]{3,}$/.test(id)) return msg("Identifiant invalide : 3 caractères minimum, sans espace.", "bad");
+  if (mdp.length < 6) return msg("Le mot de passe doit contenir au moins 6 caractères.", "bad");
+  activationEnCours = true;
+  try {
+    const cred = await auth.createUserWithEmailAndPassword(id + DOMAINE, mdp);
+    const ref = db.collection("stagiaires").doc(code);
+    const snap = await ref.get();
+    if (!snap.exists || snap.data().uid !== null || snap.data().actif !== true) {
+      await cred.user.delete();
+      activationEnCours = false;
+      return msg("Code invalide, déjà utilisé, ou compte désactivé. Contactez l'administrateur.", "bad");
+    }
+    await ref.update({ uid: cred.user.uid });
+    await db.collection("liaisons").doc(cred.user.uid).set({ sid: code });
+    await auth.signOut();
+    activationEnCours = false;
+    ecranConnexion();
+    msg("Compte activé. Connectez-vous avec votre identifiant et votre mot de passe.", "ok");
+  } catch (e) {
+    activationEnCours = false;
+    msg("Erreur : " + esc(e.message), "bad");
+  }
+}
+
+// ---------- Aiguillage après connexion ----------
+auth.onAuthStateChanged(async u => {
+  arreterEcoutes();
+  if (activationEnCours) return;
+  if (!u) return ecranConnexion();
+  if (u.email === ADMIN_EMAIL) { role = "admin"; ecranAdmin(); abonnementsAdmin(); return; }
+  const l = await db.collection("liaisons").doc(u.uid).get();
+  if (!l.exists) {
+    $("app").innerHTML = `<div class="card"><p>Ce compte n'est pas relié à un stagiaire actif. Contactez l'administrateur.</p><button class="grey" onclick="auth.signOut()">Déconnexion</button></div>`;
+    return;
+  }
+  role = "stagiaire"; monSid = l.data().sid;
+  ecranStagiaire(); abonnementsStagiaire();
+});// ---------- Vue administrateur ----------
+function ecranAdmin() {
+  $("app").innerHTML = `
+  <div class="card"><div class="row"><h1>Administration</h1><button class="add grey" onclick="auth.signOut()">Quitter</button></div>
+    <p class="small">Mise à jour en direct</p></div>
+  <div class="card"><h2>Bilan du mois (retards et absences)</h2><div id="a-bilan"></div></div>
+  <div class="card"><h2>Pointages d'aujourd'hui</h2><div id="a-jour"></div></div>
+  <div class="card"><h2>Stagiaires</h2>
+    <input id="s-prenom" placeholder="Prénom">
+    <input id="s-nom" placeholder="Nom">
+    <input id="s-tel" placeholder="Téléphone WhatsApp (ex. 600 000 000)">
+    <button onclick="ajouterStagiaire()">Ajouter et préparer l'invitation</button>
+    <div id="msg"></div>
+    <div id="a-stag" style="margin-top:12px"></div>
+  </div>
+  <div class="card"><h2>Remplacements</h2><div id="a-rempl"></div></div>
+  <div class="card"><h2>Dernières modifications de planning</h2><div id="a-hist"></div></div>`;
+}
+function abonnementsAdmin() {
+  const ecoute = (q, cb) => unsubs.push(q.onSnapshot(cb, e => msg("Accès impossible : " + esc(e.message), "bad")));
+  ecoute(db.collection("stagiaires"), s => { stagiaires = docs(s).sort((a, b) => (a.nom || "").localeCompare(b.nom || "")); rafraichirAdmin(); });
+  ecoute(db.collection("coordonnees"), s => { coords = Object.fromEntries(s.docs.map(d => [d.id, d.data().telephone])); rafraichirAdmin(); });
+  ecoute(db.collection("pointages").where("mois", "==", moisCourant()), s => { pointages = docs(s); rafraichirAdmin(); });
+  ecoute(db.collection("plannings"), s => { plannings = docs(s); rafraichirAdmin(); });
+  ecoute(db.collection("remplacements"), s => { remplacements = docs(s); rafraichirAdmin(); });
+}
+function rafraichirAdmin() {
+  if (!$("a-bilan")) return;
+  const bilan = bilanMois();
+  $("a-bilan").innerHTML = bilan.length
+    ? `<table><tr><th>Stagiaire</th><th>Retards</th><th>Absences</th></tr>${bilan.map(b => `<tr><td>${esc(b.s.prenom)} ${esc(b.s.nom)}</td><td>${b.retards}</td><td>${b.absences}</td></tr>`).join("")}</table>`
+    : `<p class="small">Aucun stagiaire activé pour le moment.</p>`;
+
+  const auj = iso(new Date());
+  const jr = pointages.filter(p => p.date === auj).sort((a, b) => ts(a.cree) - ts(b.cree));
+  $("a-jour").innerHTML = jr.length
+    ? `<table><tr><th>Stagiaire</th><th>Type</th><th>Heure</th><th>Statut</th></tr>${jr.map(p => `<tr><td>${esc(nomDe(p.sid))}</td><td>${p.type === "arrivee" ? "Arrivée" : "Départ"}</td><td>${p.heure}</td><td>${esc(p.statut)}</td></tr>`).join("")}</table>`
+    : `<p class="small">Aucun pointage aujourd'hui.</p>`;
+
+  $("a-stag").innerHTML = stagiaires.map(s => {
+    const lien = !s.uid ? ` · <a href="${lienWhatsApp(s.id, s.prenom, coords[s.id])}" target="_blank">Renvoyer l'invitation</a>` : "";
+    return `<div class="ligne"><span><b>${esc(s.prenom)} ${esc(s.nom)}</b> ${s.actif ? "" : "<span class='small'>(désactivé)</span>"}<br>
+      <span class="small">Code ${s.id} · ${s.uid ? "compte activé" : "en attente d'activation"} · ${esc(coords[s.id] || "sans téléphone")}${lien}</span></span>
+      <button class="add ${s.actif ? "grey" : ""}" onclick="basculer('${s.id}', ${s.actif})">${s.actif ? "Désactiver" : "Réactiver"}</button></div>`;
+  }).join("") || `<p class="small">Aucun stagiaire.</p>`;
+
+  const rl = [...remplacements].sort((a, b) => b.jour.localeCompare(a.jour));
+  const statutTxt = { demande: "en attente", accepte: "accepté", refuse: "refusé" };
+  $("a-rempl").innerHTML = rl.length
+    ? rl.map(r => `<div class="ligne"><span>${dateFR(parseISO(r.jour))} · ${LIBELLE[r.plage]}<br>
+        <span class="small">${esc(nomDe(r.de))} → ${r.vers ? esc(nomDe(r.vers)) : esc(nomDe(r.cible))} · ${statutTxt[r.statut]}</span></span>
+        ${r.statut === "demande" ? `<button class="add grey" onclick="refuserRemp('${r.id}')">Refuser</button>` : ""}</div>`).join("")
+    : `<p class="small">Aucun remplacement.</p>`;
+
+  const hist = [...plannings].sort((a, b) => ts(b.cree) - ts(a.cree)).slice(0, 15);
+  $("a-hist").innerHTML = hist.length
+    ? hist.map(h => `<div class="ligne" style="display:block"><b>${esc(nomDe(h.sid))}</b> · période du ${dateFR(parseISO(h.periode))}<br>
+        <span class="small">${dateTxt(h.cree)} : ${(h.modifs || []).map(m => `${dateFR(parseISO(m.jour))} ${LIBELLE[m.de]} → ${LIBELLE[m.a]}`).join(" ; ")}</span></div>`).join("")
+    : `<p class="small">Aucune modification.</p>`;
+}
+function lienWhatsApp(id, prenom, telephone) {
+  let num = (telephone || "").replace(/\D/g, "");
+  if (num && !num.startsWith("237")) num = "237" + num;
+  const url = location.href.split("#")[0];
+  const texte = `Bonjour ${prenom}, vous êtes inscrit(e) au pointage du NHC. Ouvrez ce lien : ${url} puis cliquez sur « Premier accès » et saisissez le code : ${id}. Vous choisirez ensuite votre identifiant et votre mot de passe.`;
+  return "https://wa.me/" + num + "?text=" + encodeURIComponent(texte);
+}
+async function ajouterStagiaire() {
+  const prenom = $("s-prenom").value.trim(), nom = $("s-nom").value.trim(), tel = $("s-tel").value.trim();
+  if (!prenom || !nom) return msg("Prénom et nom sont obligatoires.", "bad");
+  const id = codeAleatoire();
+  await db.collection("stagiaires").doc(id).set({ prenom, nom, actif: true, uid: null, cree: TS() });
+  await db.collection("coordonnees").doc(id).set({ telephone: tel });
+  ["s-prenom", "s-nom", "s-tel"].forEach(x => $(x).value = "");
+  msg(`${esc(prenom)} ajouté(e). <a href="${lienWhatsApp(id, prenom, tel)}" target="_blank">Envoyer l'invitation par WhatsApp</a>`, "ok");
+}
+async function basculer(id, actif) {
+  await db.collection("stagiaires").doc(id).update({ actif: !actif });
+}
+async function refuserRemp(id) {
+  await db.collection("remplacements").doc(id).update({ statut: "refuse" });
+}
+
+// ---------- Vue stagiaire ----------
+function ecranStagiaire() {
+  planningModifie = false;
+  $("app").innerHTML = `
+  <div class="card"><div class="row"><h1>Mon espace</h1><button class="add grey" onclick="auth.signOut()">Quitter</button></div></div>
+
+  <div class="card"><h2>1. Pointer</h2>
+    <div class="row"><button onclick="pointer('arrivee')">Arrivée</button><button class="grey" onclick="pointer('depart')">Départ</button></div>
+    <div id="msg"></div>
+    <div id="s-pointages" style="margin-top:10px"></div>
+  </div>
+
+  <div class="card"><h2>2. Mon planning (deux semaines)</h2>
+    <p class="small">Modification possible jusqu'à 72 heures avant le début de la plage. Toute modification est datée et visible de tous. Les jours grisés sont verrouillés.</p>
+    <div id="s-planning"></div>
+    <button onclick="enregistrerPlanning()">Enregistrer mes modifications</button>
+    <div id="msg-plan"></div>
+  </div>
+
+  <div class="card"><h2>3. Remplacement</h2>
+    <p class="small">Demande possible jusqu'à 36 heures avant la plage. Un collègue ne peut faire que ${MAX_REMP_REMPLACANT} remplacements par mois.</p>
+    <div id="s-rempl-form"></div>
+    <div id="s-rempl-liste" style="margin-top:12px"></div>
+  </div>`;
+  rendrePlanning();
+  rendreFormRemp();
+  rafraichirStagiaire();
+}
+function abonnementsStagiaire() {
+  const ecoute = (q, cb) => unsubs.push(q.onSnapshot(cb, e => msg("Accès impossible : " + esc(e.message), "bad")));
+  ecoute(db.collection("stagiaires"), s => { stagiaires = docs(s); if (!$("r-col")) rendreFormRemp(); rafraichirStagiaire(); });
+  ecoute(db.collection("pointages").where("mois", "==", moisCourant()), s => { pointages = docs(s); rafraichirStagiaire(); });
+  ecoute(db.collection("plannings"), s => {
+    plannings = docs(s);
+    if (!planningModifie) { rendrePlanning(); rendreFormRemp(); }
+  });
+  ecoute(db.collection("remplacements"), s => { remplacements = docs(s); rafraichirStagiaire(); });
+}
+function rafraichirStagiaire() {
+  if (!$("s-pointages")) return;
+  const auj = iso(new Date());
+  const mes = pointages.filter(p => p.sid === monSid && p.date === auj).sort((a, b) => ts(a.cree) - ts(b.cree));
+  $("s-pointages").innerHTML = mes.length
+    ? mes.map(p => `<div class="ligne"><span>${p.type === "arrivee" ? "Arrivée" : "Départ"} à ${p.heure}</span><span class="small">${esc(p.statut)}</span></div>`).join("")
+    : `<p class="small">Aucun pointage aujourd'hui.</p>`;
+
+  const recus = remplacements.filter(r => r.statut === "demande" && r.cible === monSid);
+  const miens = remplacements.filter(r => r.de === monSid).sort((a, b) => b.jour.localeCompare(a.jour)).slice(0, 10);
+  $("s-rempl-liste").innerHTML =
+    recus.map(r => `<div class="ligne"><span>${esc(nomDe(r.de))} vous demande de le remplacer le ${dateFR(parseISO(r.jour))} (${LIBELLE[r.plage]})</span>
+      <button class="add" onclick="accepterRemp('${r.id}')">Accepter</button></div>`).join("") +
+    (miens.length ? `<h3>Mes demandes</h3>` + miens.map(r => `<div class="ligne"><span>${dateFR(parseISO(r.jour))} · ${LIBELLE[r.plage]}</span>
+      <span class="small">${r.statut === "accepte" ? "accepté par " + esc(nomDe(r.vers)) : r.statut === "refuse" ? "refusé" : "en attente"}</span></div>`).join("") : "");
+}
+
+// Planning : deux périodes de 14 jours, à partir de la période en cours
+function rendrePlanning() {
+  if (!$("s-planning")) return;
+  const auj = jour0(new Date());
+  const p1 = periodeDe(auj);
+  $("s-planning").innerHTML = [p1, plus(p1, 14)].map(p => {
+    const cur = planningActuel(monSid, p);
+    const lignes = jours14(p).map(d => {
+      const j = iso(d);
+      const c = cur[j] || "non";
+      const verrou = heuresAvant(debutPlage(d, codeOk(c) ? c : "jour")) < DELAI_PLANNING_H;
+      const opts = ["non", "jour", "garde"].map(o => `<option value="${o}" ${o === c ? "selected" : ""}>${LIBELLE[o]}</option>`).join("");
+      return `<div class="ligne" style="${verrou ? "opacity:.5" : ""}"><span style="min-width:90px">${dateFR(d)}</span>
+        <select data-jour="${j}" ${verrou ? "disabled" : ""} onchange="planningModifie=true">${opts}</select></div>`;
+    }).join("");
+    return `<h3>Du ${dateFR(p)} au ${dateFR(plus(p, 13))}</h3>${lignes}`;
+  }).join("");
+}
+async function enregistrerPlanning() {
+  const p1 = periodeDe(jour0(new Date()));
+  const refus = [];
+  let nb = 0;
+  for (const p of [p1, plus(p1, 14)]) {
+    const cur = planningActuel(monSid, p);
+    const nouveaux = { ...cur };
+    const modifs = [];
+    for (const d of jours14(p)) {
+      const j = iso(d);
+      const sel = document.querySelector(`select[data-jour="${j}"]`);
+      if (!sel) continue;
+      const ancien = cur[j] || "non", nv = sel.value;
+      if (nv === ancien) continue;
+      const ref = codeOk(nv) ? nv : ancien;
+      if (heuresAvant(debutPlage(d, codeOk(ref) ? ref : "jour")) < DELAI_PLANNING_H) { refus.push(dateFR(d)); continue; }
+      nouveaux[j] = nv;
+      modifs.push({ jour: j, de: ancien, a: nv });
+    }
+    if (modifs.length) {
+      await db.collection("plannings").add({ sid: monSid, periode: iso(p), jours: nouveaux, modifs, cree: TS() });
+      nb += modifs.length;
+    }
+  }
+  planningModifie = false;
+  let t = nb ? `${nb} modification(s) enregistrée(s).` : "Aucune modification à enregistrer.";
+  if (refus.length) t += ` Refusé (moins de 72 h avant) : ${refus.join(", ")}.`;
+  msg(t, refus.length ? "bad" : "ok", "msg-plan");
+}
+
+// Pointage GPS
+async function pointer(type) {
+  const now = new Date(), auj = jour0(now);
+  let jourPlage, code;
+  if (type === "arrivee") {
+    jourPlage = auj; code = plageDe(monSid, auj);
+  } else {
+    const hier = plus(auj, -1);
+    if (now.getHours() < 12 && plageDe(monSid, hier) === "garde") { jourPlage = hier; code = "garde"; }
+    else { jourPlage = auj; code = plageDe(monSid, auj); }
+  }
+  if (!codeOk(code)) return msg("Aucune plage prévue pour vous ce jour-là. Signalez-le à l'administrateur.", "bad");
+  if (type === "arrivee" && pointages.some(p => p.sid === monSid && p.type === "arrivee" && p.jour === iso(jourPlage)))
+    return msg("Votre arrivée est déjà enregistrée pour cette plage.", "bad");
+  if (!(await position())) return;
+
+  let statut;
+  if (type === "arrivee") {
+    const r = Math.round((now - debutPlage(jourPlage, code)) / 60000);
+    statut = r > TOLERANCE_MIN ? `Retard de ${r} min` : "A l'heure";
+  } else {
+    const fin = new Date(jourPlage.getFullYear(), jourPlage.getMonth(), jourPlage.getDate() + (code === "garde" ? 1 : 0), HEURE_FIN[code]);
+    statut = now < fin ? "Départ anticipé" : "Départ";
+  }
+  await db.collection("pointages").add({
+    sid: monSid, type, jour: iso(jourPlage), mois: iso(jourPlage).slice(0, 7),
+    date: iso(now), heure: heure(now), statut, cree: TS()
+  });
+  const alerte = statut.startsWith("Retard") || statut.includes("anticip");
+  msg(`${type === "arrivee" ? "Arrivée" : "Départ"} enregistré à ${heure(now)} : ${statut}.`, alerte ? "bad" : "ok");
+}
+
+// Remplacements
+function rendreFormRemp() {
+  if (!$("s-rempl-form")) return;
+  const auj = jour0(new Date());
+  const dispo = [];
+  for (let i = 0; i < 28; i++) {
+    const d = plus(auj, i), c = plageDe(monSid, d);
+    if (codeOk(c) && heuresAvant(debutPlage(d, c)) >= DELAI_REMPLACEMENT_H) dispo.push({ d, c });
+  }
+  const cols = stagiaires.filter(s => s.actif && s.uid && s.id !== monSid);
+  $("s-rempl-form").innerHTML = `
+    <select id="r-jour">${dispo.map(x => `<option value="${iso(x.d)}">${dateFR(x.d)} · ${LIBELLE[x.c]}</option>`).join("") || '<option value="">Aucun jour éligible</option>'}</select>
+    <select id="r-col">${cols.map(s => `<option value="${s.id}">${esc(s.prenom)} ${esc(s.nom)}</option>`).join("") || '<option value="">Aucun collègue activé</option>'}</select>
+    <button onclick="demanderRemp()">Demander un remplacement</button>
+    <div id="msg-rempl"></div>`;
+}
+async function demanderRemp() {
+  const j = $("r-jour").value, c = $("r-col").value;
+  if (!j || !c) return msg("Choisissez un jour et un collègue.", "bad", "msg-rempl");
+  const d = parseISO(j), code = plageDe(monSid, d);
+  if (!codeOk(code) || heuresAvant(debutPlage(d, code)) < DELAI_REMPLACEMENT_H)
+    return msg("Cette plage n'est plus remplaçable (délai de 36 heures).", "bad", "msg-rempl");
+  if (remplacements.some(r => r.de === monSid && r.jour === j && r.statut === "demande"))
+    return msg("Une demande est déjà en attente pour ce jour.", "bad", "msg-rempl");
+  await db.collection("remplacements").add({ de: monSid, cible: c, vers: null, jour: j, plage: code, statut: "demande", cree: TS() });
+  msg("Demande envoyée. Votre collègue doit l'accepter dans l'application.", "ok", "msg-rempl");
+}
+async function accepterRemp(id) {
+  const r = remplacements.find(x => x.id === id);
+  if (!r || r.statut !== "demande") return;
+  const d = parseISO(r.jour);
+  if (heuresAvant(debutPlage(d, r.plage)) < DELAI_REMPLACEMENT_H)
+    return msg("Trop tard : le délai minimum de 36 heures n'est plus respecté.", "bad", "msg-rempl");
+  if (codeOk(plageDe(monSid, d)))
+    return msg("Vous avez déjà une plage ce jour-là.", "bad", "msg-rempl");
+  const nbMois = remAcceptes().filter(x => x.vers === monSid && x.jour.slice(0, 7) === r.jour.slice(0, 7)).length;
+  if (nbMois >= MAX_REMP_REMPLACANT)
+    return msg(`Vous avez déjà fait ${MAX_REMP_REMPLACANT} remplacements ce mois-ci.`, "bad", "msg-rempl");
+  await db.collection("remplacements").doc(id).update({ statut: "accepte", vers: monSid });
+  msg("Remplacement accepté. L'administrateur le voit sur son tableau de bord.", "ok", "msg-rempl");
+}
+</script>
+</body>
+</html>
